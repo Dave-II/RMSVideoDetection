@@ -46,7 +46,7 @@ from RMS.Formats.FrameInterface import detectInputType
 from RMS.Formats.AST import loadAST
 from RMS.Logger import LoggingManager, getLogger
 from RMS.Misc import mkdirP
-from RMS.Routines.Grouping3D import find3DLines, getAllPoints
+from RMS.Routines.LineFinder3D import find3DLines, getAllPoints, stitch3DLines
 from RMS.Routines.CompareLines import compareLines
 from RMS.Routines import MaskImage
 from RMS.Routines import Image
@@ -575,18 +575,26 @@ def merge3DLines(line_list, vect_angle_thresh, last_count=0):
             v2 = np.array([x22-x21, y22-y21, z22-z21])
 
 
+            # Create a vector from line points (2D - image plane only)
+            # This prevents the frame (z) component from dominating the angle calculation
+            v1_2d = v1[:2]
+            v2_2d = v2[:2]
+
             # Create a vector from the first point of the first line and the last point of the second line
-            v_both = np.array([x22 - x11, y22 - y11, z22 - z11])
+            v_both_2d = np.array([x22 - x11, y22 - y11])
 
-            # Calculate the angle between the v_both and v1
-            vect_angle1 = _vectorAngle(v1, v_both)
+            # Calculate the angle between the v_both and v1 (2D)
+            vect_angle1 = _vectorAngle(v1_2d, v_both_2d)
 
-            # Calculate the angle between the v_both and v1
-            vect_angle2 = _vectorAngle(v2, v_both)
+            # Calculate the angle between the v_both and v2 (2D)
+            vect_angle2 = _vectorAngle(v2_2d, v_both_2d)
+
+            # Calculate the direct angle between the two lines (2D)
+            vect_angle12 = _vectorAngle(v1_2d, v2_2d)
 
 
-            # Check if the vector angles are close enough to the vector that connects them
-            if (vect_angle1 < vect_angle_thresh) and (vect_angle2 < vect_angle_thresh):
+            # Check if the vector angles are close enough
+            if (vect_angle1 < vect_angle_thresh) and (vect_angle2 < vect_angle_thresh) and (vect_angle12 < vect_angle_thresh):
 
                 # Check if the frames overlap
                 if set(range(line1_fmin, line1_fmax+1)).intersection(range(line2_fmin, line2_fmax+1)):
@@ -644,7 +652,7 @@ def getLines(img_handle, k1, j1, time_slide, time_window_size, max_lines, max_wh
     mask=None, flat_struct=None, dark=None, debug=False, kht_cluster_min_size=9, kht_cluster_min_deviation=2, \
     kht_delta=0.1, kht_kernel_min_height=0.004, kht_n_sigmas=1, kht_morph_ops=[1, 2, 3, 4, 1], \
     line_finder_algorithm='kht', ransac_max_lines=10, ransac_min_pixels=10, ransac_distance_thresh=2.0, \
-    ransac_min_line_length=20.0, ransac_max_gap=20.0, frame_range=None):
+    ransac_min_line_length=20.0, ransac_max_gap=20.0, frame_range=None, border=5):
     """ Get (rho, phi) pairs for each meteor present on the image using KHT.
         
     Arguments:
@@ -679,6 +687,7 @@ def getLines(img_handle, k1, j1, time_slide, time_window_size, max_lines, max_wh
         frame_range: [tuple] Optional (start_frame, end_frame) to restrict detection to a range of frames.
             If given, only frame chunks overlapping this range will be processed. The end frame will be 
             padded up to the next time_window_size boundary.
+        border: [int] Number of pixels to mask out from the border of the image.
 
     Return:
         [list] A list of all found lines. Each entry is [rho, theta, frame_min, frame_max] for KHT,
@@ -706,7 +715,7 @@ def getLines(img_handle, k1, j1, time_slide, time_window_size, max_lines, max_wh
     if img_handle.input_type == 'ff':
 
         # Threshold the FF
-        ff_thresh = thresholdFF(img_handle.ff, k1, j1, mask=mask)
+        ff_thresh = thresholdFF(img_handle.ff, k1, j1, mask=mask, border=border)
 
         # # Show thresholded image
         # showImage("thresholded ALL", ff_thresh, convert_to_uint8=True)
@@ -767,7 +776,7 @@ def getLines(img_handle, k1, j1, time_slide, time_window_size, max_lines, max_wh
             img_handle = preprocessFF(img_handle, mask, flat_struct, dark)
 
             # Threshold the frame chunk
-            img_thresh = thresholdFF(img_handle.ff, k1, j1, mask=mask, mask_ave_bright=True)
+            img_thresh = thresholdFF(img_handle.ff, k1, j1, mask=mask, mask_ave_bright=True, border=border)
 
             # Check if there are too many threshold passers, if so report that no lines were found
             if not checkWhiteRatio(img_thresh, img_handle.ff, max_white_ratio):
@@ -875,8 +884,8 @@ def getLines(img_handle, k1, j1, time_slide, time_window_size, max_lines, max_wh
                 line_results.append(line_entry)
                 frame_lines.append(line_entry)
 
-
         if debug:
+        #if False:
             # Create a summary image showing: 
             # a) Raw stack,
             # b) Thresholded stack, 
@@ -1335,10 +1344,6 @@ def checkAngularVelocity(centroids, config):
 
 
 
-import matplotlib.pyplot as plt
-import numpy as np
-import cv2
-import sys
 
 def showImage(name, img, convert_to_uint8=False):
     """ 
@@ -1612,8 +1617,19 @@ def plotLines(ff, line_list, show_image=True):
 
 
 
-def show3DCloud(ff, xs, ys, zs, detected_line=None, stripe_points=None, config=None):
-    """ Shows 3D point cloud of stripe points.
+def show3DCloud(ff, xs, ys, zs, detected_line=None, stripe_points=None, config=None,
+    all_detected_lines=None):
+    """ Shows 3D point cloud of stripe points with all detected lines overlaid.
+
+    Arguments:
+        ff: [FF object] FF file object.
+        xs, ys, zs: [ndarrays] Point cloud coordinates.
+
+    Keyword arguments:
+        detected_line: [list] The chosen best-fit line. Format: [(x1,y1,z1), (x2,y2,z2), ...].
+        stripe_points: [ndarray] All stripe points (used to extract points for the chosen line).
+        config: [config object] Configuration object.
+        all_detected_lines: [list] All candidate lines from find3DLines to plot. None by default.
     """
 
     if detected_line is None:
@@ -1625,36 +1641,57 @@ def show3DCloud(ff, xs, ys, zs, detected_line=None, stripe_points=None, config=N
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
 
-    ax.scatter(xs, ys, zs)
+    ax.scatter(xs, ys, zs, s=5, alpha=0.3, c='tab:blue')
 
+    # Colours for candidate lines (distinct from the chosen line's red)
+    line_colors = ['tab:orange', 'tab:green', 'tab:purple', 'tab:cyan',
+                   'tab:olive', 'tab:pink', 'tab:brown']
+
+    # Plot ALL detected lines with distinct colours and numbered labels
+    if all_detected_lines:
+        for idx_dl, dl in enumerate(all_detected_lines):
+            lx = [dl[0][0], dl[1][0]]
+            ly = [dl[0][1], dl[1][1]]
+            lz = [dl[0][2], dl[1][2]]
+
+            col = line_colors[idx_dl % len(line_colors)]
+            ax.plot(lx, ly, lz, c=col, linewidth=2, alpha=0.7)
+
+            # Label at midpoint
+            mx = (lx[0] + lx[1]) / 2.0
+            my = (ly[0] + ly[1]) / 2.0
+            mz = (lz[0] + lz[1]) / 2.0
+            ax.text(mx, my, mz, '{:d}'.format(idx_dl), color='white', fontsize=10,
+                fontweight='bold', ha='center', va='bottom',
+                bbox=dict(facecolor=col, alpha=0.7, edgecolor='none', pad=1))
+
+    # Highlight the chosen line in red and show its associated points
     if detected_line and len(stripe_points):
 
-        xs = [detected_line[0][1], detected_line[1][1]]
-        ys = [detected_line[0][0], detected_line[1][0]]
-        zs = [detected_line[0][2], detected_line[1][2]]
-        ax.plot(ys, xs, zs, c = 'r')
+        xs_l = [detected_line[0][0], detected_line[1][0]]
+        ys_l = [detected_line[0][1], detected_line[1][1]]
+        zs_l = [detected_line[0][2], detected_line[1][2]]
+        ax.plot(xs_l, ys_l, zs_l, c='r', linewidth=3, label='chosen')
 
-        x1, x2 = ys
-        y1, y2 = xs
-        z1, z2 = zs
+        x1, y1, z1 = detected_line[0][0], detected_line[0][1], detected_line[0][2]
+        x2, y2, z2 = detected_line[1][0], detected_line[1][1], detected_line[1][2]
 
-        detected_points = getAllPoints(stripe_points, x1, y1, z1, x2, y2, z2, config, 
+        detected_points = getAllPoints(stripe_points, x1, y1, z1, x2, y2, z2, config,
             fireball_detection=False)
 
         if detected_points.any():
 
             detected_points = np.array(detected_points)
 
-            xs = detected_points[:,0]
-            ys = detected_points[:,1]
-            zs = detected_points[:,2]
-
-            ax.scatter(xs, ys, zs, c = 'r', s = 40)
+            ax.scatter(detected_points[:,0], detected_points[:,1], detected_points[:,2],
+                c='r', s=40, label='chosen pts')
 
     # Set limits
-    plt.xlim((0, ff.ncols))
-    plt.ylim((0, ff.nrows))
-    ax.set_zlim((0, 255))
+    ax.set_xlim((0, ff.ncols))
+    ax.set_ylim((0, ff.nrows))
+    ax.set_xlabel('X (px)')
+    ax.set_ylabel('Y (px)')
+    ax.set_zlabel('Frame')
 
     plt.show()
 
@@ -1698,7 +1735,7 @@ def thresholdAndCorrectGammaFF(img_handle, config, mask, mask_ave_bright=True):
     """ Prepare the FF for centroid extraction by performing gamma correction. """
 
     # Threshold the FF
-    img_thres = thresholdFF(img_handle.ff, config.k1_det, config.j1_det, mask=mask, mask_ave_bright=mask_ave_bright)
+    img_thres = thresholdFF(img_handle.ff, config.k1_det, config.j1_det, mask=mask, mask_ave_bright=mask_ave_bright, border=config.detection_border)
 
 
     # Gamma correct image files
@@ -1806,7 +1843,7 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
         kht_morph_ops=config.kht_morph_ops, line_finder_algorithm=config.line_finder_algorithm, \
         ransac_max_lines=config.ransac_max_lines, ransac_min_pixels=config.ransac_min_pixels, \
         ransac_distance_thresh=config.ransac_distance_thresh, ransac_min_line_length=config.ransac_min_line_length, \
-        ransac_max_gap=config.ransac_max_gap, frame_range=frame_range)
+        ransac_max_gap=config.ransac_max_gap, frame_range=frame_range, border=config.detection_border)
 
     # logDebug('List of lines:', line_list)
 
@@ -1936,6 +1973,24 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
 
         filtered_lines = []
 
+        logDebug('\n================================')
+        logDebug('Lines to analyze: {:d}'.format(len(line_list)))
+        logDebug('================================')
+        for li, line in enumerate(line_list):
+            if len(line) >= 8:
+                rho, theta, fmin, fmax, lx1, ly1, lx2, ly2 = line[:8]
+                dx = lx2 - lx1
+                dy = ly2 - ly1
+                length = np.sqrt(dx**2 + dy**2)
+                logDebug('  Line {:d}: rho={:.2f}, theta={:.2f}, frames={:d}-{:d}, '
+                         'start=({:.2f}, {:.2f}), end=({:.2f}, {:.2f}), len={:.2f} px'.format(
+                         li, rho, theta, int(fmin), int(fmax), lx1, ly1, lx2, ly2, length))
+            else:
+                rho, theta, fmin, fmax = line[:4]
+                logDebug('  Line {:d}: rho={:.2f}, theta={:.2f}, frames={:d}-{:d}'.format(
+                         li, rho, theta, int(fmin), int(fmax)))
+        logDebug('================================')
+
         # Analyze stripes of each line
         # This step makes sure that there is a linear propagation of the detections in time
         for line in line_list:
@@ -1989,7 +2044,7 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
 
             # Extract (x, y, frame) of thresholded frames, i.e. pixel and frame locations of threshold passers
             t1 = time()
-            xs, ys, zs = getThresholdedStripe3DPoints(config, img_handle, frame_min, frame_max, rho, theta, \
+            xs, ys, zs, ws = getThresholdedStripe3DPoints(config, img_handle, frame_min, frame_max, rho, theta, \
                 mask, flat_struct, dark, debug=debug, line_start=line_start, line_end=line_end)
             
             logDebug('Time for thresholding and stripe extraction: {:.3f}'.format(time() - t1))
@@ -2020,56 +2075,68 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
             t1 = time()
 
             logDebug('finding lines...')
+            
+            # # Print the point cloud used for line search
+            # if debug:
+            #     logDebug(f"Point cloud used for line search ({len(stripe_points)} points):")
+            #     for pt in stripe_points:
+            #         logDebug(f"  {pt[0]:.2f}, {pt[1]:.2f}, {pt[2]:.2f}")
 
-            # Find a single line in the point cloud
-            detected_line = find3DLines(stripe_points, time(), config, fireball_detection=False)
+            # Find all lines in the point cloud
+            detected_lines = find3DLines(stripe_points, time(), config, fireball_detection=False)
 
             logDebug('time for GROUPING: {:.3f}'.format(time() - t1))
 
-            # Extract the first and only line if any
-            if detected_line:
+            # Extract the appropriate line(s) and stitch them together
+            if detected_lines:
 
-                # Choose the 3D line whose 2D spatial direction best matches the initial
-                # RANSAC/KHT line orientation
-                if len(detected_line) == 1:
-                    detected_line = detected_line[0]
+                if debug:
+                    logDebug('All found 3D lines:')
+                    for idx_dl, dl in enumerate(detected_lines):
+                        dx = dl[1][0] - dl[0][0]
+                        dy = dl[1][1] - dl[0][1]
+                        df = dl[1][2] - dl[0][2]
+                        mx, my = 0.0, 0.0
+                        if abs(df) > 1e-6:
+                            mx = dx / df
+                            my = dy / df
+                        logDebug(f"  {idx_dl:2d}: ({dl[0][0]:.2f}, {dl[0][1]:.2f}, {dl[0][2]:.2f}) -> ({dl[1][0]:.2f}, {dl[1][1]:.2f}, {dl[1][2]:.2f})  dx/df: {mx:6.2f}, dy/df: {my:6.2f}  [{dl[2]:d} pts, f:{dl[4]:d}-{dl[5]:d}]")
+
+                # Save all detected lines for visualization
+                all_detected_lines = list(detected_lines)
+
+                # Determine the reference line coordinates (from 2D line)
+                ref_line_coords = None
+                if line_start is not None and line_end is not None:
+                    ref_line_coords = (line_start[0], line_start[1], line_end[0], line_end[1])
                 else:
-                    # Compute the reference 2D direction from the initial line
-                    if line_start is not None and line_end is not None:
-                        # RANSAC: use segment endpoints
-                        ref_dx = line_end[0] - line_start[0]
-                        ref_dy = line_end[1] - line_start[1]
-                    else:
-                        # KHT: direction perpendicular to the normal (rho, theta)
-                        theta_rad = np.deg2rad(theta)
-                        ref_dx = -np.sin(theta_rad)
-                        ref_dy = np.cos(theta_rad)
+                    theta_rad = np.deg2rad(theta)
+                    a, b = np.cos(theta_rad), np.sin(theta_rad)
+                    x0 = a * rho + img_handle.ff.ncols / 2.0
+                    y0 = b * rho + img_handle.ff.nrows / 2.0
+                    ref_line_coords = (x0 - 1000*(-b), y0 - 1000*a, x0 + 1000*(-b), y0 + 1000*a)
+                
+                # Stitch segments together to form the full meteor track
+                # Using 10deg angular threshold and configurable spatial threshold
+                img_diag = np.sqrt(config.width**2 + config.height**2)
+                frame_scale = img_diag / 256.0 if img_diag > 0 else 1.0
+                detected_line = stitch3DLines(
+                    detected_lines, 
+                    ref_line_coords, 
+                    ref_has_frames=False,
+                    frame_scale=frame_scale,
+                    dist_thresh=config.ransac3d_stitch_dist_thresh,
+                    debug=debug
+                )
 
-                    ref_len = np.sqrt(ref_dx**2 + ref_dy**2)
-                    if ref_len > 1e-9:
-                        ref_dx /= ref_len
-                        ref_dy /= ref_len
+                if detected_line is None:
+                    logDebug('No matching 3D line found after stitching!')
+                    continue
 
-                    # Find the line with the smallest angular difference
-                    best_line = detected_line[0]
-                    best_cos = -1.0
+                if debug:
+                    logDebug('Stitched 3D line: {}'.format(detected_line))
 
-                    for dl in detected_line:
-                        # dl format: [(x1,y1,z1), (x2,y2,z2), counter, quality, f_first, f_last]
-                        dx3d = dl[1][0] - dl[0][0]
-                        dy3d = dl[1][1] - dl[0][1]
-                        dl_len = np.sqrt(dx3d**2 + dy3d**2)
-                        if dl_len < 1e-9:
-                            continue
-                        # Compare 2D spatial directions (absolute dot product for antiparallel)
-                        cos_sim = abs(ref_dx * dx3d / dl_len + ref_dy * dy3d / dl_len)
-                        if cos_sim > best_cos:
-                            best_cos = cos_sim
-                            best_line = dl
-
-                    detected_line = best_line
-
-                # logDebug(detected_line)
+                logDebug(detected_line)
                 
 
                 # Check the detection if it has the proper angular velocity (correct for binning if not 
@@ -2079,11 +2146,13 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
 
                 if not ang_vel_status:
                     logDebug(detected_line)
-                    logDebug('Rejected at initial stage due to the angular velocity: {:.2f} deg/s'.format(ang_vel))
+                    logDebug('Rejected at initial stage due to the angular velocity: {:.5f} deg/s'.format(ang_vel))
                     continue
 
-                # Show 3D cloud
-                show3DCloud(img_handle.ff, xs, ys, zs, detected_line, stripe_points, config)
+                # Show 3D cloud with all candidate lines
+                if debug:
+                    show3DCloud(img_handle.ff, xs, ys, zs, detected_line, stripe_points, config,
+                        all_detected_lines=all_detected_lines)
 
                 # Add the line to the results list
                 filtered_lines.append(detected_line)
@@ -2092,8 +2161,8 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
                 logDebug('No temporal propagation found!')
 
 
-        # Merge similar lines in 3D
-        filtered_lines = merge3DLines(filtered_lines, config.vect_angle_thresh)
+        # Merge similar lines in 3D (Disabled for testing)
+        # filtered_lines = merge3DLines(filtered_lines, config.vect_angle_thresh)
 
         # logDebug('after filtering:')
         # logDebug(filtered_lines)
@@ -2104,6 +2173,36 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
 
             img_thres, max_avg_corrected, flattened_weights, \
                 min_patch_intensity = thresholdAndCorrectGammaFF(img_handle, config, mask)
+
+
+        # Before centroiding, print a summary of all lines and their parameters that are 
+        #   going to be used for centroiding
+        if debug:
+            logDebug('\n================================')
+            logDebug('Lines to be centroided: {:d}'.format(len(filtered_lines)))
+            logDebug('================================')
+            for li, dl in enumerate(filtered_lines):
+                x1, y1, f1 = dl[0]
+                x2, y2, f2 = dl[1]
+                pts_count = dl[2]
+                f_min, f_max = dl[4], dl[5]
+                df = f2 - f1
+                if abs(df) > 1e-6:
+                    dx_df = (x2 - x1)/df
+                    dy_df = (y2 - y1)/df
+                    x0 = x1 - dx_df*f1
+                    y0 = y1 - dy_df*f1
+                else:
+                    dx_df = dy_df = x0 = y0 = 0.0
+                spatial_len = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                logDebug('  Line {:d}:'.format(li))
+                logDebug('    Start: ({:.2f}, {:.2f}) f={:.2f}  ->  End: ({:.2f}, {:.2f}) f={:.2f}'.format(
+                    x1, y1, f1, x2, y2, f2))
+                logDebug('    Frames: {:d} - {:d} ({:d} frames), {:d} pts, {:.2f} px length'.format(
+                    f_min, f_max, f_max - f_min + 1, pts_count, spatial_len))
+                logDebug('    dx/df: {:.2f}, dy/df: {:.2f}, x0: {:.2f}, y0: {:.2f}'.format(
+                    dx_df, dy_df, x0, y0))
+            logDebug('================================')
 
 
         # Go through all detected and filtered lines and compute centroids
@@ -2164,7 +2263,7 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
 
             # Extract (x, y, frame) of thresholded frames, i.e. pixel and frame locations of threshold passers
             t1 = time()
-            xs, ys, zs = getThresholdedStripe3DPoints(config, img_handle, frame_min, frame_max, rho, theta, \
+            xs, ys, zs, ws = getThresholdedStripe3DPoints(config, img_handle, frame_min, frame_max, rho, theta, \
                 mask, flat_struct, dark, stripe_width_factor=1.5, centroiding=True, \
                 point1=detected_line[0], point2=detected_line[1], debug=False)
             logDebug('Time for thresholding and stripe extraction: {:.3f}'.format(time() - t1))

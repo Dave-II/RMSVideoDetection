@@ -148,15 +148,14 @@ if __name__ == "__main__":
     stdpixel[stdpixel == 0] = 1.0 # Avoid division by zero
 
 
-    # Mask out stars by removing all pixels from consideration where stdpixel is 5 sigma above the median stdpixel
-    star_mask = stdpixel > (np.median(stdpixel) + 5*np.std(stdpixel))
+    # Mask out stars by removing all pixels from consideration where stdpixel is 3 sigma above the median stdpixel AND the avepixel is above the median avepixel
+    star_mask = (stdpixel > (np.median(stdpixel) + 3*np.std(stdpixel))) & (ff.avepixel > (np.median(ff.avepixel) + 2*np.std(ff.avepixel)))
 
-    # Dilate the mask by 2 pixels
-    star_mask = scipy.ndimage.binary_dilation(star_mask, iterations=2)
+    # Dilate the mask by 3 pixels
+    star_mask = scipy.ndimage.binary_dilation(star_mask, iterations=3)
 
     # Compute the stddev values
-    k1_vals = (ff.maxpixel.astype(np.float64) - ff.avepixel.astype(np.float64) \
-        - j1)/stdpixel
+    k1_vals = (ff.maxpixel.astype(np.float64) - ff.avepixel.astype(np.float64) - j1)/stdpixel
 
     # Apply the star mask to the k1 values
     k1_vals[star_mask] = 0
@@ -204,12 +203,12 @@ if __name__ == "__main__":
         plt.colorbar(k1map, ax=ax2, label='k1_det', fraction=0.046, pad=0.04)
 
     # Bottom-left: Avepixel
-    im3 = ax3.imshow(ff.avepixel, cmap='gray', aspect='equal', vmin=0, vmax=np.percentile(ff.avepixel, 99.5))
+    im3 = ax3.imshow(ff.avepixel, cmap='gray', aspect='equal', vmin=np.percentile(ff.avepixel, 0.5), vmax=np.percentile(ff.avepixel, 99.5))
     ax3.set_title("Avepixel")
     plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
 
     # Bottom-center: Stdpixel (Noise)
-    im4 = ax4.imshow(stdpixel, cmap='gray', aspect='equal', vmin=0, vmax=np.percentile(stdpixel, 99.5))
+    im4 = ax4.imshow(stdpixel, cmap='gray', aspect='equal', vmin=np.percentile(stdpixel, 0.5), vmax=np.percentile(stdpixel, 99.5))
     ax4.set_title("Stdpixel (Noise)")
     plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
 

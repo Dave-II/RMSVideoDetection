@@ -5,6 +5,8 @@ import time
 # Cython import
 cimport numpy as np
 cimport cython
+from libc.math cimport fabsf, fmaxf
+from libc.stdlib cimport rand
 
 # Define numpy types
 INT16_TYPE = np.uint16
@@ -23,8 +25,9 @@ cdef class FFMimickInterface:
     cdef public object dtype
     cdef public np.npy_bool calibrated, successful
     
-    # We use Float32 for the running accumulators to allow for sub-integer precision
-    cdef np.ndarray med_buf, mad_buf 
+    # Stored frames for Reservoir Sampling (to estimate robust background)
+    cdef np.ndarray sample_buf
+    cdef int res_size
     
     # Public output arrays (matching your original interface types)
     cdef public np.ndarray maxpixel, avepixel, stdpixel
@@ -43,94 +46,85 @@ cdef class FFMimickInterface:
         self.calibrated = False
         self.successful = False
 
-        # Init outputs
-        self.maxpixel = np.zeros((nrows, ncols), dtype=dtype)
-        self.avepixel = np.zeros((nrows, ncols), dtype=dtype) # Will hold the Median
-        self.stdpixel = np.zeros((nrows, ncols), dtype=dtype) # Will hold the MAD
+        # Init outputs - all internal processing done in uint16 for robustness
+        self.maxpixel = np.zeros((nrows, ncols), dtype=np.uint16)
+        self.avepixel = np.zeros((nrows, ncols), dtype=np.uint16)
+        self.stdpixel = np.zeros((nrows, ncols), dtype=np.uint16)
 
-        # Internal float buffers for the running approximation
-        self.med_buf = np.zeros((nrows, ncols), dtype=np.float32)
-        self.mad_buf = np.zeros((nrows, ncols), dtype=np.float32)
+        # Internal buffer for the Reservoir Sampling
+        self.res_size = 256
+        self.sample_buf = np.zeros((self.res_size, nrows, ncols), dtype=np.uint16)
 
 
     cpdef addFrame(self, np.ndarray[INT16_TYPE_t, ndim=2] frame):
-        """ Add raw frame. Handles initialization on the first frame automatically. """
+        """ Add raw frame and update sampling buffer for robust background estimation. """
         
-        # Initialization: If it's the first frame, jump start the buffers
+        # Initialize maxpixel on the first frame
         if self.nframes == 0:
-            
-            self.med_buf[:, :] = frame.astype(np.float32)
-            
-            # Initialize noise floor to a small value
-            self.mad_buf[:, :] = 1.0
-            
-            # Initialize maxpixel
             self.maxpixel[:, :] = frame
-
         else:
-            self.frameProc(frame)
+            # Update maxpixel (Standard, always applied)
+            # Use NumPy maximum for speed
+            self.maxpixel[...] = np.maximum(self.maxpixel, frame)
+        
+        # Reservoir sampling to fill/update the buffer
+        # This ensuring the buffer always contains a representative sample of all frames
+        if self.nframes < self.res_size:
+            # Fill the buffer sequentially for the first N frames
+            self.sample_buf[self.nframes, :, :] = frame
+        else:
+            # Randomly replace an existing frame in the buffer with probability res_size/n_total
+            # This is the Reservoir Sampling algorithm (Algorithm R)
+            if (rand()%(self.nframes + 1)) < self.res_size:
+                self.sample_buf[rand() % self.res_size, :, :] = frame
         
         self.nframes += 1
 
-    cdef frameProc(self, np.ndarray[INT16_TYPE_t, ndim=2] frame):
-        cdef int i, j
-        cdef int nrows = self.nrows
-        cdef int ncols = self.ncols
-        cdef float pix_val, med_val, mad_val, diff
-        
-        # Access raw data pointers for speed
-        cdef float[:, :] med_view = self.med_buf
-        cdef float[:, :] mad_view = self.mad_buf
-        cdef INT16_TYPE_t[:, :] frame_view = frame
-        cdef INT16_TYPE_t[:, :] max_view = self.maxpixel
-
-        for i in range(nrows):
-            for j in range(ncols):
-            
-                pix_val = <float>frame_view[i, j]
-                med_val = med_view[i, j]
-                mad_val = mad_view[i, j]
-
-                # --- 1. Update Max Pixel (Standard) ---
-                if pix_val > max_view[i, j]:
-                    max_view[i, j] = <INT16_TYPE_t>pix_val
-
-                # --- 2. Update Approximate Median (Sigma-Delta) ---
-                # If pixel > median, increment median. If pixel < median, decrement.
-                # This converges to the median without sorting.
-                if pix_val > med_val:
-                    med_val += 1.0
-                elif pix_val < med_val:
-                    med_val -= 1.0
-                
-                # Write back to buffer
-                med_view[i, j] = med_val
-
-                # --- 3. Update Approximate MAD (Noise Estimation) ---
-                # Calculate deviation from our current median estimate
-                diff = abs(pix_val - med_val)
-                
-                # Same Sigma-Delta logic for the deviation
-                if diff > mad_val:
-                    mad_val += 1.0
-                elif diff < mad_val:
-                    mad_val -= 1.0
-                
-                mad_view[i, j] = mad_val
 
     cpdef finish(self):
-        """ Finalize the arrays. """
+        """ Finalize the arrays by calculating Median and MAD from the sample buffer. """
         
-        # Convert the float buffers to the output format
-        self.avepixel = self.med_buf.astype(self.dtype)
+        # Check if we have any frames
+        if self.nframes == 0:
+            self.successful = False
+            return False
+
+        # Number of samples actually in the buffer
+        cdef int n_samples = min(self.nframes, self.res_size)
         
-        # Convert MAD to approximate Standard Deviation
-        # Sigma approx = 1.4826*MAD
-        # We can do this math on the whole array at once (vectorized)
-        self.stdpixel = (self.mad_buf*1.4826).astype(self.dtype)
+        # Use NumPy's optimized median along the temporal axis (axis 0)
+        # Slicing the buffer to only include valid samples
+        cdef np.ndarray valid_samples = self.sample_buf[:n_samples]
         
-        # Safety for zero noise
-        self.stdpixel[self.stdpixel == 0] = 1
+        # 1. Calculate Median (avepixel)
+        # We compute this in float32 for precision during MAD calculation
+        cdef np.ndarray median_float = np.median(valid_samples, axis=0).astype(np.float32)
+        
+        # 2. Calculate Median Absolute Deviation (MAD)
+        # MAD = median(|x - median|)
+        # The factor 1.4826 converts MAD to an unbiased estimate of Standard Deviation for normal distribution
+        cdef np.ndarray abs_diff = np.abs(valid_samples.astype(np.float32) - median_float)
+        cdef np.ndarray mad = np.median(abs_diff, axis=0)
+        
+        cdef np.ndarray std_float = mad * 1.4826
+
+        # Safety for zero noise (Standard Deviation must be at least 1 for thresholding)
+        std_float[std_float <= 0] = 1
+
+        # Determine clipping bounds based on target dtype (default to uint8 range if not set)
+        cdef float min_val = 0.0
+        cdef float max_val = 65535.0
+        try:
+            info = np.iinfo(self.dtype)
+            min_val = <float>info.min
+            max_val = <float>info.max
+        except:
+            pass
+
+        # Final clipping and casting to target dtype
+        self.maxpixel = np.clip(self.maxpixel, min_val, max_val).astype(self.dtype)
+        self.avepixel = np.clip(median_float, min_val, max_val).astype(self.dtype)
+        self.stdpixel = np.clip(std_float,    min_val, max_val).astype(self.dtype)
         
         self.successful = True
         return True
