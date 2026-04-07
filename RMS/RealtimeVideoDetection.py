@@ -297,7 +297,8 @@ if __name__ == "__main__":
     arg_parser.add_argument('--video_file_dir', metavar='VIDEO_FILE_DIR', type=str, help="Path to a directory containing video files to be used asvideo sources"
                             " instead of a camera.")
     arg_parser.add_argument('--night_dir', metavar='NIGHT_DIR', type=str, help="Path to a directory where results should be stored.  If it ends in +, the night start time is")
-    arg_parser.add_argument('--night_start_time', metavar='NIGHT_START_TIME', type=str, help="The night start time in HH:MM:SS format used in naming the night directory.")
+    arg_parser.add_argument('--night_start_time', metavar='NIGHT_START_TIME', type=str, help="The night start time in HH:MM:SS format used in naming the night directory.",
+                            default="18:00:00")
     arg_parser.add_argument('--cores', metavar='CORES', type=int, default=1, help="Number of CPU cores to use.")
     arg_parser.add_argument('--prefix', metavar='PREFIX', type=str, default='detection_', help="Prefix to add to log files.")
     arg_parser.add_argument('--suffix', metavar='SUFFIX', type=str, default='', help="Suffix to append to output files.")
@@ -376,7 +377,7 @@ if __name__ == "__main__":
             else:
                 processed_tracker.setProcessed(cml_args.reset_processed_files)
                 print(f"Processed file tracker updated with {cml_args.reset_processed_files}")
-        exit(0) 
+            exit(0)        
   
     # We have no current realtime video detector
     rtvd = None
@@ -429,9 +430,9 @@ if __name__ == "__main__":
     
                 # Provide a night directory name, possibly constructing it from the provided start of night time
                 if cml_args.night_dir.endswith('+'):
-                    # Get the datetime of the prvious night starting time
+                    # Get the datetime of the previous night starting time
                     night_start_time = datetime.strptime(cml_args.night_start_time, '%H:%M:%S')
-                    # Get today' date and the current time separately
+                    # Get the videos date and the current time separately
                     video_date = video_start_time.date()
                     video_time = video_start_time.time()
                     night_start_datetime = datetime.combine(video_date, night_start_time.time())
