@@ -296,9 +296,9 @@ if __name__ == "__main__":
     arg_parser.add_argument('--video_file', metavar='VIDEO_FILE', type=str, help="Path to a video file to be used as a video source")
     arg_parser.add_argument('--video_file_dir', metavar='VIDEO_FILE_DIR', type=str, help="Path to a directory containing video files to be used asvideo sources"
                             " instead of a camera.")
-    arg_parser.add_argument('--night_dir', metavar='NIGHT_DIR', type=str, help="Path to a directory where results should be stored.  If it ends in +, the night start time is")
-    arg_parser.add_argument('--night_start_time', metavar='NIGHT_START_TIME', type=str, help="The night start time in HH:MM:SS format used in naming the night directory.",
-                            default="18:00:00")
+    arg_parser.add_argument('--night_dir', metavar='NIGHT_DIR', type=str, help="Path to a directory where results should be stored.  If it ends in +, the night end time is used")
+    arg_parser.add_argument('--night_end_time', metavar='NIGHT_END_TIME', type=str, help="The night end time in HH:MM:SS format used in naming the night directory.",
+                            default="12:00:00")
     arg_parser.add_argument('--cores', metavar='CORES', type=int, default=1, help="Number of CPU cores to use.")
     arg_parser.add_argument('--prefix', metavar='PREFIX', type=str, default='detection_', help="Prefix to add to log files.")
     arg_parser.add_argument('--suffix', metavar='SUFFIX', type=str, default='', help="Suffix to append to output files.")
@@ -312,8 +312,6 @@ if __name__ == "__main__":
 
     # Parse the command line arguments
     cml_args = arg_parser.parse_args()
-
-
 
     # A video file source must be provided
     if cml_args.video_file_dir is None and cml_args.video_file is None:
@@ -340,19 +338,19 @@ if __name__ == "__main__":
             print("--reset_processed_files can only be set when processing a video file directory.")
             exit(1)
     else:
-        # The night directory must be specified.  If it ends with +, the start of night time must be specified
+        # The night directory must be specified.  If it ends with +, the end of night time must be specified
         if cml_args.night_dir is None:
             print ("--night_dir must be provided.")
             exit(1)
-        if cml_args.night_dir.endswith('+') and cml_args.night_start_time is None:
-            print ("--night_start_time must be provided when --night_dir ends with +.")
+        if cml_args.night_dir.endswith('+') and cml_args.night_end_time is None:
+            print ("--night_end_time must be provided when --night_dir ends with +.")
             exit(1)
-        # If specified the start of night time must be in "HH", "HH:MM", or "HH:MM:SS" format
-        if cml_args.night_start_time is not None:
+        # If specified the end of night time must be in "HH", "HH:MM", or "HH:MM:SS" format
+        if cml_args.night_end_time is not None:
             try:
-                time.strptime(cml_args.night_start_time, '%H:%M:%S')
+                time.strptime(cml_args.night_end_time, '%H:%M:%S')
             except ValueError:
-                print ("--night_start_time must be in HH:MM:SS format.")
+                print ("--night_end_time must be in HH:MM:SS format.")
                 exit(1)
 
     # Load the config file
@@ -428,18 +426,18 @@ if __name__ == "__main__":
                 if rtvd is not None:
                     closeDetector()
     
-                # Provide a night directory name, possibly constructing it from the provided start of night time
+                # Provide a night directory name, possibly constructing it from the provided end of night time
                 if cml_args.night_dir.endswith('+'):
-                    # Get the datetime of the previous night starting time
-                    night_start_time = datetime.strptime(cml_args.night_start_time, '%H:%M:%S')
+                    # Get the datetime of the previous night ending time
+                    night_end_time = datetime.strptime(cml_args.night_end_time, '%H:%M:%S')
                     # Get the videos date and the current time separately
                     video_date = video_start_time.date()
                     video_time = video_start_time.time()
-                    night_start_datetime = datetime.combine(video_date, night_start_time.time())
-                    if video_time < night_start_time.time():
-                        night_start_datetime = night_start_datetime - timedelta(days=1)
-                    night_dir = cml_args.night_dir.replace('+', config.stationID + '_' + night_start_datetime.strftime('%Y%m%d_%H%M%S')+'_000000')
-                    rtvd_datetime = night_start_datetime
+                    night_end_datetime = datetime.combine(video_date, night_end_time.time())
+                    if video_time > night_end_time.time():
+                        night_end_datetime = night_end_datetime + timedelta(days=1)
+                    night_dir = cml_args.night_dir.replace('+', config.stationID + '_' + night_end_datetime.strftime('%Y%m%d_%H%M%S')+'_000000')
+                    rtvd_datetime = night_end_datetime
                 else:
                     night_dir = cml_args.night_dir
             
