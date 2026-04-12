@@ -224,8 +224,8 @@ def mergeLines(line_list, min_distance, img_w, img_h, last_count=0):
 
 
 
-def mergeRansacLines(line_list, img_w, img_h, angle_thresh=15.0, dist_thresh_factor=6.0, 
-    gap_thresh_factor=8.0, last_count=0):
+def mergeRansacLines(line_list, img_w, img_h, angle_thresh=15.0, dist_thresh_factor=1.0, 
+    gap_thresh_factor=2.0, last_count=0):
     """ Merge similar RANSAC line segments across different frame windows using 3D space-time geometry.
 
     Each line segment is treated as a 3D line in (x, y, frame*velocity) space, where velocity
@@ -255,9 +255,9 @@ def mergeRansacLines(line_list, img_w, img_h, angle_thresh=15.0, dist_thresh_fac
         angle_thresh: [float] Maximum angular difference (degrees) between direction vectors.
             Default 15.0.
         dist_thresh_factor: [float] Perpendicular distance threshold as a multiple of the 
-            image diagonal / 100. Default 6.0.
+            image diagonal / 100. Default 1.0 (approx 22px for 1080p).
         gap_thresh_factor: [float] Maximum 3D longitudinal gap as a multiple of the image 
-            diagonal / 100. Default 8.0.
+            diagonal / 100. Default 2.0 (approx 44px for 1080p).
         last_count: [int] Used for recursion, default is 0 and it should be left as is!
 
     Return:
@@ -361,10 +361,10 @@ def mergeRansacLines(line_list, img_w, img_h, angle_thresh=15.0, dist_thresh_fac
                 else:
                     spatial_gap = 0
 
-                # Rule 1: If there's a spatial gap during overlapping time windows, reject.
-                # If these were the same track, the overlapping detection window would have 
-                # detected them as one continuous segment, not two separate ones with a gap.
-                if spatial_gap > 0:
+                # Rule 1: If there's a spatial gap during overlapping time windows, reject if it's too large.
+                # Tracks broken by noise may appear as two segments in the same window, so we allow 
+                # a small gap up to gap_thresh.
+                if spatial_gap > gap_thresh:
                     continue
 
             else:
